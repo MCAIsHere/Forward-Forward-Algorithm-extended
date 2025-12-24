@@ -3,10 +3,10 @@ import torch.nn as nn
 from torch.optim import Adam
 from tqdm import tqdm
 from torchvision.datasets import MNIST
-from torchvision.transforms import Compose, ToTensor, Normalize, Lambda
+from torchvision.transforms import Compose, ToTensor, Normalize
 from torch.utils.data import DataLoader
 
-def MNIST_loaders(train_batch_size=512, test_batch_size=10000):
+def MNIST_loaders(train_batch_size=50, test_batch_size=1000):
     transform = Compose([
         ToTensor(),
         Normalize((0.1307,), (0.3081,))])
@@ -26,32 +26,18 @@ def MNIST_loaders(train_batch_size=512, test_batch_size=10000):
     return train_loader, test_loader
 
 def overlay_y_on_x(x, y):
-    x_ = x.clone()
-    mask = torch.zeros_like(x_, device=x_.device)
-
-    lines_coordinates = [6, 10, 14, 18, 22]
-    for xi in lines_coordinates:  # rename from x -> xi
-        mask[:, xi:xi+2, :] = 1
-
-    if isinstance(y, int):
-        y = torch.full((x.size(0),), y, device=x.device)
-
-    # Apply per-example roll
-    for i in range(x.size(0)):
-        mask[i] = torch.roll(mask[i], shifts=18 * y[i].item(), dims=1)
-
-    x_ = (x_ + mask) / 2
-    return x_
+    batch_size = x.size(0)
+    label_channel = torch.zeros_like(x)
+    for i in range(batch_size):
+        label_channel[i] = y[i].float() / 9.0 
+    return torch.cat([x, label_channel], dim=1)
 
 class Net(nn.Module):
-    def __init__(self, conv_dims, linear_dims):
+    def __init__(self, conv_dims):
         super().__init__()
         self.conv_layers = nn.ModuleList()
-        self.linear_layers = nn.ModuleList()
         for c in range(len(conv_dims) - 1):
             self.conv_layers.append(Conv_Layer(conv_dims[c], conv_dims[c + 1]).cuda())
-        for l in range(len(linear_dims) - 1):
-            self.linear_layers.append(Linear_Layer(linear_dims[l], linear_dims[l + 1]).cuda())
 
     def predict(self, x):
         goodness_per_label = []
@@ -62,10 +48,6 @@ class Net(nn.Module):
             for layer in self.conv_layers:
                 h = layer(h)
                 goodness += [h.pow(2).mean(dim=(1,2,3))]
-            h = torch.flatten(h, 1)
-            for layer in self.linear_layers:
-                h = layer(h)
-                goodness += [h.pow(2).mean(dim=1)]
 
             goodness_per_label += [sum(goodness).unsqueeze(1)]
 
@@ -74,76 +56,34 @@ class Net(nn.Module):
 
     def train_net(self, x_pos, x_neg):
         h_pos, h_neg = x_pos, x_neg
-
         for i, layer in enumerate(self.conv_layers):
             print('training conv layer', i, '...')
             h_pos, h_neg = layer.train_layer(h_pos, h_neg)
 
-        h_pos = torch.flatten(h_pos, 1)
-        h_neg = torch.flatten(h_neg, 1)
-
-        for i, layer in enumerate(self.linear_layers):
-            print('training linear layer', i, '...')
-            h_pos, h_neg = layer.train_layer(h_pos, h_neg)
-
-
-class Linear_Layer(nn.Linear):
-    def __init__(self, in_features, out_features):
-        super().__init__(in_features, out_features)
-        self.relu = nn.ReLU()
-
-        self.threshold = 2.0
-        self.num_epochs = 100
-        self.opt = Adam(self.parameters(), lr=0.01)
-
-    def forward(self, x):
-        x_direction = x / (x.norm(2, dim=1, keepdim=True) + 1e-4)
-        return self.relu(x_direction @ self.weight.T + self.bias.unsqueeze(0))
-
-    def train_layer(self, x_pos, x_neg):
-        for _ in tqdm(range(self.num_epochs)):
-            g_pos = self.forward(x_pos).pow(2).mean(1)
-            g_neg = self.forward(x_neg).pow(2).mean(1)
-
-            loss = torch.log(1 + torch.exp(torch.cat([-g_pos + self.threshold, g_neg - self.threshold]))).mean()
-            self.opt.zero_grad()
-
-            loss.backward()
-            self.opt.step()
-        return self.forward(x_pos).detach(), self.forward(x_neg).detach()
-
 class Conv_Layer(nn.Module):
-    def __init__(self, in_features, out_features, kernel_size = 3, stride = 1, padding = 1):
+    def __init__(self, in_features, out_features):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels = in_features,
-            out_channels = out_features,
-            kernel_size = kernel_size,
-            stride = stride,
-            padding = padding
-        )
+        self.conv = nn.Conv2d(in_channels = in_features, out_channels = out_features, 
+                              kernel_size = 7,stride = 1,padding = 3)
+        self.norm = nn.LayerNorm([out_features, 28, 28])
         self.relu = nn.ReLU()
-        self.pooling = nn.MaxPool2d(2,2)
-
-        self.threshold = 2.0
-        self.num_epochs = 100
-        self.opt = Adam(self.parameters(), lr=0.03)
+        self.threshold = 28*28*out_features
+        self.num_epochs = 200
+        self.opt = Adam(self.parameters(), lr=0.0005)
 
     def forward(self, x):
-        norm = x.norm(p=2, dim=(1, 2, 3), keepdim=True) + 1e-4
-        x = x / norm
-
         x = self.conv(x)
+        x = self.norm(x)
         x = self.relu(x)
-        x = self.pooling(x)
         return x
 
     def train_layer(self, x_pos, x_neg):
         for _ in tqdm(range(self.num_epochs)):
-            g_pos = (self.forward(x_pos)).pow(2).mean(dim=(1, 2, 3))
-            g_neg = (self.forward(x_neg)).pow(2).mean(dim=(1, 2, 3))
+            g_pos = (self.forward(x_pos)).pow(2).sum(dim=(1,2,3)) - self.threshold
+            g_neg = -(self.forward(x_neg)).pow(2).sum(dim=(1,2,3)) + self.threshold
 
-            loss = torch.log(1 + torch.exp(torch.cat([-g_pos + self.threshold, g_neg - self.threshold]))).mean()
+            # Binary Cross Entropy loss
+            loss = torch.log(1 + torch.exp(-g_pos)).mean() + torch.log(1 + torch.exp(-g_neg)).mean()
 
             self.opt.zero_grad()
             loss.backward()
@@ -156,7 +96,7 @@ if __name__ == "__main__":
     torch.manual_seed(1234)
     train_loader, test_loader = MNIST_loaders()
 
-    net = Net([1, 16, 32],[1568,128,10]).to("cuda")
+    net = Net([2, 128, 128, 128]).to("cuda")
     x, y = next(iter(train_loader))
     x, y = x.to("cuda"), y.to("cuda")
     x_pos = overlay_y_on_x(x, y)
@@ -173,3 +113,5 @@ if __name__ == "__main__":
     test_error = net.predict(x_te).eq(y_te).float().mean().item()
     print('test error:', 1.0 - test_error)
     print(f'Accuracy: {(test_error*100):.2f}%')
+
+    torch.save(net.state_dict(), "CNN_FF_model")

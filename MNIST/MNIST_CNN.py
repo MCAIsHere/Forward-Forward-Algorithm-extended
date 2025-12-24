@@ -94,3 +94,5 @@ if __name__ == "__main__":
 
     train()
     test()
+
+    torch.save(net.state_dict(), "CNN_model")
