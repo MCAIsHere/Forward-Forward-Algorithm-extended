@@ -1,0 +1,17 @@
+MNIST_FF:
+• Train time - 1m 55s
+• Number of epochs - 1000
+• Accuracy - 95.39%
+• Memory usage on similar performance - 1465.54 MB
+
+MNIST_CNN:
+• Train time - 5m 39s
+• Number of epochs - 25
+• Accuracy - 98.98%
+• Memory usage on similar performance - 365.93 MB
+
+MNIST_CNN_FF:
+• Train time -
+• Number of epochs -
+• Accuracy -
+• Memory usage on similar performance -
